@@ -1,4 +1,4 @@
-import he from 'he';
+import { htmlEntityDecode } from './html-entity-decoder';
 import {
     domCreateElement,
     domSetAttribute,
@@ -130,7 +130,7 @@ export class XmlParser {
 
                         let attribute;
                         while ((attribute = this.XML10_ATTRIBUTE_REGEXP.exec(text))) {
-                            const val = he.decode(attribute[5] || attribute[7] || '');
+                            const val = htmlEntityDecode(attribute[5] || attribute[7] || '');
                             domSetAttribute(node, attribute[1], val);
                         }
 
@@ -159,14 +159,14 @@ export class XmlParser {
                     }
                     if (htmlText.slice(i + 1, i + 4) === '!--') {
                         let endTagIndex = htmlText.slice(i + 4).indexOf('-->');
-                        if (endTagIndex) {
+                        if (endTagIndex >= 0) {
                             let node = domCreateComment(xmlDocument, htmlText.slice(i + 4, i + endTagIndex + 4));
                             domAppendChild(parent, node);
                             i += endTagIndex + 6;
                         }
                     } else if (htmlText.slice(i + 1, i + 9) === '!DOCTYPE') {
                         let endTagIndex = htmlText.slice(i + 9).indexOf('>');
-                        if (endTagIndex) {
+                        if (endTagIndex >= 0) {
                             const dtdValue = htmlText.slice(i + 9, i + endTagIndex + 9).trimStart();
                             // TODO: Not sure if this is a good solution.
                             // Trying to implement this: https://github.com/DesignLiquido/xslt-processor/issues/30
@@ -246,7 +246,7 @@ export class XmlParser {
 
                     let attribute;
                     while ((attribute = regexAttribute.exec(text))) {
-                        const val = he.decode(attribute[5] || attribute[7] || '');
+                        const val = htmlEntityDecode(attribute[5] || attribute[7] || '');
                         domSetAttribute(node, attribute[1], val);
                     }
 
@@ -285,25 +285,25 @@ export class XmlParser {
             } else if (!tag && char === '<') {
                 let text = xml.slice(start, i);
                 if (text && parent !== root) {
-                    domAppendChild(parent, domCreateTextNode(xmlDocument, text));
+                    domAppendChild(parent, domCreateTextNode(xmlDocument, htmlEntityDecode(text)));
                 }
                 if (xml.slice(i + 1, i + 4) === '!--') {
                     let endTagIndex = xml.slice(i + 4).indexOf('-->');
-                    if (endTagIndex) {
+                    if (endTagIndex >= 0) {
                         let node = domCreateComment(xmlDocument, xml.slice(i + 4, i + endTagIndex + 4));
                         domAppendChild(parent, node);
                         i += endTagIndex + 6;
                     }
                 } else if (xml.slice(i + 1, i + 9) === '![CDATA[') {
                     let endTagIndex = xml.slice(i + 9).indexOf(']]>');
-                    if (endTagIndex) {
+                    if (endTagIndex >= 0) {
                         let node = domCreateCDATASection(xmlDocument, xml.slice(i + 9, i + endTagIndex + 9));
                         domAppendChild(parent, node);
                         i += endTagIndex + 11;
                     }
                 } else if (xml.slice(i + 1, i + 9) === '!DOCTYPE') { // "!DOCTYPE" can be used in a XSLT template.
                     let endTagIndex = xml.slice(i + 9).indexOf('>');
-                    if (endTagIndex) {
+                    if (endTagIndex >= 0) {
                         const dtdValue = xml.slice(i + 9, i + endTagIndex + 9).trimStart();
                         // TODO: Not sure if this is a good solution.
                         // Trying to implement this: https://github.com/DesignLiquido/xslt-processor/issues/30

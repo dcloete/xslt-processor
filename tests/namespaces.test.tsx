@@ -5,10 +5,7 @@ import assert from 'assert';
 import { Xslt } from '../src/xslt';
 import { XmlParser } from '../src/dom';
 
-// TODO:
-// "xsl" prefix for non-XSL namespace
-// namespaces in input XML
-// using namespace prefixes in xpath
+// TODO: Test "xsl" prefix bound to non-XSL namespace (edge case)
 
 describe('namespaces', () => {
     it('non-"xsl" prefix in stylesheet test', async () => {
@@ -50,40 +47,37 @@ describe('namespaces', () => {
         assert.equal(outXmlString, expectedOutString);
     });
 
-    // TODO: Fix test to be relevant again.
-    it.skip('namespace-uri() test', async () => {
+    it('namespace-uri() test', async () => {
         const xmlString = (
             `<root xmlns="http://example.com">
                 <test />
                 <test xmlns="http://example.test/2" />
-                <example:test xmlns:example="http://example.test/3" />
                 <test xmlns="" />
             </root>`
         );
 
         const xsltString =
             `<?xml version="1.0"?>
-            <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
-                <xsl:template match="test">
+            <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+                            xmlns:ex="http://example.com"
+                            xmlns:ex2="http://example.test/2">
+                <xsl:template match="ex:test | ex2:test | test">
                     <span>
                         <xsl:value-of select="namespace-uri()" />
                     </span>
                 </xsl:template>
                 <xsl:template match="/">
                     <div>
-                        <xsl:apply-templates select="//*" />
+                        <xsl:apply-templates select="//ex:test | //ex2:test | //test" />
                     </div>
                 </xsl:template>
             </xsl:stylesheet>`;
 
-        const expectedOutString = (
-            `<div>
-                <span>http://example.com</span>
-                <span>http://example.test/2</span>
-                <span>http://example.test/3</span>
-                <span></span>
-            </div>`
-        );
+        // namespace-uri() returns the namespace URI of the context node:
+        // - First <test /> inherits xmlns="http://example.com" from root
+        // - Second <test xmlns="http://example.test/2" /> has its own namespace
+        // - Third <test xmlns="" /> has empty (no) namespace
+        const expectedOutString = `<div><span>http://example.com</span><span>http://example.test/2</span><span></span></div>`;
 
         const xsltClass = new Xslt();
         const xmlParser = new XmlParser();
@@ -132,5 +126,38 @@ describe('namespaces', () => {
         );
 
         assert.equal(outXmlString, expectedOutString);
+    });
+
+    it('supports prefixed variable names in XPath references', async () => {
+        const xmlString = (
+            `<root>
+                <quantity>12.34</quantity>
+            </root>`
+        );
+
+        const xsltString = `<?xml version="1.0"?>
+            <xsl:stylesheet version="1.0"
+                xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+                xmlns:myns="http://www.example.com">
+                <xsl:template match="/">
+                    <out>
+                        <xsl:for-each select="/*/quantity">
+                            <xsl:variable name="myns:contentStrings_1">
+                                <xsl:value-of select="concat('Q-', string(.))" />
+                            </xsl:variable>
+                            <xsl:variable name="myns:sContent_1" select="string($myns:contentStrings_1)" />
+                            <xsl:value-of select="$myns:sContent_1" />
+                        </xsl:for-each>
+                    </out>
+                </xsl:template>
+            </xsl:stylesheet>`;
+
+        const xsltClass = new Xslt();
+        const xmlParser = new XmlParser();
+        const xml = xmlParser.xmlParse(xmlString);
+        const xslt = xmlParser.xmlParse(xsltString);
+        const outXmlString = await xsltClass.xsltProcess(xml, xslt);
+
+        assert.equal(outXmlString, '<out>Q-12.34</out>');
     });
 });

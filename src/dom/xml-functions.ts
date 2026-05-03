@@ -1,4 +1,4 @@
-import he from 'he';
+import { htmlEntityDecode } from './html-entity-decoder';
 
 import {
     DOM_ATTRIBUTE_NODE,
@@ -8,6 +8,7 @@ import {
     DOM_DOCUMENT_NODE,
     DOM_DOCUMENT_TYPE_NODE,
     DOM_ELEMENT_NODE,
+    DOM_PROCESSING_INSTRUCTION_NODE,
     DOM_TEXT_NODE
 } from '../constants';
 import { domGetAttributeValue } from './functions';
@@ -56,18 +57,9 @@ export function xmlValue(node: XNode, disallowBrowserSpecificOptimization: boole
                 }
             }
 
-            if (node.transformedChildNodes.length > 0) {
-                const transformedTextNodes = node.transformedChildNodes.filter(
-                    (n: XNode) => n.nodeType !== DOM_ATTRIBUTE_NODE
-                );
-                for (let i = 0; i < transformedTextNodes.length; ++i) {
-                    ret += xmlValue(transformedTextNodes[i]);
-                }
-            } else {
-                const textNodes = node.childNodes.filter((n: XNode) => n.nodeType !== DOM_ATTRIBUTE_NODE);
-                for (let i = 0; i < textNodes.length; ++i) {
-                    ret += xmlValue(textNodes[i]);
-                }
+            const textNodes = node.childNodes.filter((n: XNode) => n.nodeType !== DOM_ATTRIBUTE_NODE);
+            for (let i = 0; i < textNodes.length; ++i) {
+                ret += xmlValue(textNodes[i]);
             }
 
             return ret;
@@ -113,9 +105,9 @@ export function xmlValueLegacyBehavior(node: XNode, disallowBrowserSpecificOptim
                 }
             }
 
-            const len = node.transformedChildNodes.length;
+            const len = node.childNodes.length;
             for (let i = 0; i < len; ++i) {
-                returnedXmlString += xmlValue(node.transformedChildNodes[i]);
+                returnedXmlString += xmlValue(node.childNodes[i]);
             }
 
             break;
@@ -230,33 +222,62 @@ export function xmlTransformedText(
  */
 function xmlTransformedTextRecursive(node: XNode, buffer: string[], options: XmlOutputOptions) {
     if (node.visited) return;
-    const nodeType = node.transformedNodeType || node.nodeType;
-    const nodeValue = node.transformedNodeValue || node.nodeValue;
+    const nodeType = node.nodeType
+    const nodeValue = node.nodeValue;
     if (nodeType === DOM_TEXT_NODE) {
-        if (node.transformedNodeValue && node.transformedNodeValue.trim() !== '') {
+        // For text nodes created by xsl:text, don't trim whitespace
+        // For other text nodes, skip whitespace-only ones
+        const isFromXslText = node.fromXslText === true;
+        if (node.nodeValue && (isFromXslText || node.nodeValue.trim() !== '')) {
             const finalText =
-                node.escape && options.escape ? xmlEscapeText(node.transformedNodeValue): xmlUnescapeText(node.transformedNodeValue);
+                node.escape && options.escape ? xmlEscapeText(node.nodeValue): xmlUnescapeText(node.nodeValue);
             buffer.push(finalText);
         }
     } else if (nodeType === DOM_CDATA_SECTION_NODE) {
-        if (options.cData) {
+        if (options.outputMethod === 'text') {
+            // For text output, extract the raw content without CDATA markers
+            buffer.push(nodeValue);
+        } else if (options.cData) {
             buffer.push(xmlEscapeText(nodeValue));
         } else {
             buffer.push(`<![CDATA[${nodeValue}]]>`);
         }
     } else if (nodeType == DOM_COMMENT_NODE) {
-        buffer.push(`<!-- ${nodeValue} -->`);
+        if (options.outputMethod !== 'text') {
+            buffer.push(`<!--${nodeValue}-->`);
+        }
+    } else if (nodeType === DOM_PROCESSING_INSTRUCTION_NODE) {
+        if (options.outputMethod !== 'text') {
+            // Processing instruction: <?target data?>
+            if (nodeValue && nodeValue.trim()) {
+                buffer.push(`<?${node.nodeName} ${nodeValue}?>`);
+            } else {
+                buffer.push(`<?${node.nodeName}?>`);
+            }
+        }
     } else if (nodeType == DOM_ELEMENT_NODE) {
-        // If node didn't have a transformed name, but its children
-        // had transformations, children should be present at output.
-        // This is called here "muted logic".
-        if (node.transformedNodeName !== null && node.transformedNodeName !== undefined) {
-            xmlElementLogicTrivial(node, buffer, options);
+        if (options.outputMethod === 'text') {
+            // For text output, only extract text content from elements
+            xmlElementLogicTextOnly(node, buffer, options);
         } else {
-            xmlElementLogicMuted(node, buffer, options);
+            // If node didn't have a transformed name, but its children
+            // had transformations, children should be present at output.
+            // This is called here "muted logic".
+            if (node.nodeName !== null && node.nodeName !== undefined) {
+                xmlElementLogicTrivial(node, buffer, options);
+            } else {
+                xmlElementLogicMuted(node, buffer, options);
+            }
         }
     } else if (nodeType === DOM_DOCUMENT_NODE || nodeType === DOM_DOCUMENT_FRAGMENT_NODE) {
-        const childNodes = node.transformedChildNodes.concat(node.childNodes);
+        let childNodes = node.firstChild ? [] : node.childNodes;
+        if (node.firstChild) {
+            let child = node.firstChild;
+            while (child) {
+                childNodes.push(child);
+                child = child.nextSibling;
+            }
+        }
         childNodes.sort((a, b) => a.siblingPosition - b.siblingPosition);
 
         for (let i = 0; i < childNodes.length; ++i) {
@@ -276,7 +297,16 @@ function xmlTransformedTextRecursive(node: XNode, buffer: string[], options: Xml
 function xmlElementLogicTrivial(node: XNode, buffer: string[], options: XmlOutputOptions) {
     buffer.push(`<${xmlFullNodeName(node)}`);
 
-    let attributes = node.transformedChildNodes.filter((n) => n.nodeType === DOM_ATTRIBUTE_NODE);
+    let attributes: XNode[] = [];
+    if (node.firstChild) {
+        let child = node.firstChild;
+        while (child) {
+            if (child.nodeType === DOM_ATTRIBUTE_NODE) {
+                attributes.push(child);
+            }
+            child = child.nextSibling;
+        }
+    }
     if (attributes.length === 0) {
         attributes = node.childNodes.filter((n) => n.nodeType === DOM_ATTRIBUTE_NODE);
     }
@@ -287,19 +317,35 @@ function xmlElementLogicTrivial(node: XNode, buffer: string[], options: XmlOutpu
             continue;
         }
 
-        if (attribute.transformedNodeName && attribute.transformedNodeValue) {
-            buffer.push(` ${xmlFullNodeName(attribute)}="${xmlEscapeAttr(attribute.transformedNodeValue)}"`);
+        // In HTML output mode, skip only XHTML namespace declarations (redundant in HTML)
+        if (options.outputMethod === 'html' &&
+            attribute.nodeName === 'xmlns' &&
+            attribute.nodeValue === 'http://www.w3.org/1999/xhtml') {
+            continue;
+        }
+
+        if (attribute.nodeName && attribute.nodeValue !== null && attribute.nodeValue !== undefined) {
+            buffer.push(` ${xmlFullNodeName(attribute)}="${xmlEscapeAttr(attribute.nodeValue)}"`);
         }
     }
 
-    let childNodes = node.transformedChildNodes.filter((n) => n.nodeType !== DOM_ATTRIBUTE_NODE);
+    let childNodes: XNode[] = [];
+    if (node.firstChild) {
+        let child = node.firstChild;
+        while (child) {
+            if (child.nodeType !== DOM_ATTRIBUTE_NODE) {
+                childNodes.push(child);
+            }
+            child = child.nextSibling;
+        }
+    }
     if (childNodes.length === 0) {
         childNodes = node.childNodes.filter((n) => n.nodeType !== DOM_ATTRIBUTE_NODE);
     }
 
     childNodes = childNodes.sort((a, b) => a.siblingPosition - b.siblingPosition);
     if (childNodes.length === 0) {
-        if (options.outputMethod === 'html' && ['hr', 'link', 'meta'].includes(node.nodeName)) {
+        if (options.outputMethod === 'html' && ['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'].includes(node.nodeName)) {
             buffer.push('>');
         } else if (options.selfClosingTags) {
             buffer.push('/>');
@@ -324,7 +370,39 @@ function xmlElementLogicTrivial(node: XNode, buffer: string[], options: XmlOutpu
  * @param cdata If using CDATA configuration.
  */
 function xmlElementLogicMuted(node: XNode, buffer: any[], options: XmlOutputOptions) {
-    let childNodes = node.transformedChildNodes.length > 0 ? node.transformedChildNodes : node.childNodes;
+    let childNodes: XNode[] = [];
+    if (node.firstChild) {
+        let child = node.firstChild;
+        while (child) {
+            childNodes.push(child);
+            child = child.nextSibling;
+        }
+    } else {
+        childNodes = node.childNodes;
+    }
+    childNodes = childNodes.sort((a, b) => a.siblingPosition - b.siblingPosition);
+    for (let i = 0; i < childNodes.length; ++i) {
+        xmlTransformedTextRecursive(childNodes[i], buffer, options);
+    }
+}
+
+/**
+ * XML element output for text mode - extracts only text content without tags.
+ * @param node The XML node.
+ * @param buffer The output buffer.
+ * @param options XML output options.
+ */
+function xmlElementLogicTextOnly(node: XNode, buffer: string[], options: XmlOutputOptions) {
+    let childNodes: XNode[] = [];
+    if (node.firstChild) {
+        let child = node.firstChild;
+        while (child) {
+            childNodes.push(child);
+            child = child.nextSibling;
+        }
+    } else {
+        childNodes = node.childNodes;
+    }
     childNodes = childNodes.sort((a, b) => a.siblingPosition - b.siblingPosition);
     for (let i = 0; i < childNodes.length; ++i) {
         xmlTransformedTextRecursive(childNodes[i], buffer, options);
@@ -338,9 +416,9 @@ function xmlElementLogicMuted(node: XNode, buffer: any[], options: XmlOutputOpti
  * @returns The full node name as a string.
  */
 function xmlFullNodeName(node: XNode): string {
-    const nodeName = node.transformedNodeName || node.nodeName;
-    if (node.transformedPrefix && nodeName.indexOf(`${node.transformedPrefix}:`) != 0) {
-        return `${node.transformedPrefix}:${nodeName}`;
+    const nodeName = node.nodeName;
+    if (node.prefix && nodeName.indexOf(`${node.prefix}:`) != 0) {
+        return `${node.prefix}:${nodeName}`;
     }
 
     return nodeName;
@@ -385,7 +463,7 @@ function xmlEscapeAttr(s: string): string {
 
 /**
  * Wrapper function to access attribute values of template element
- * nodes. Currently this calls he.decode because in some DOM
+ * nodes. Currently this calls htmlEntityDecode because in some DOM
  * implementations the return value of node.getAttributeValue()
  * contains unresolved XML entities, although the DOM spec requires
  * that entity references are resolved by the DOM.
@@ -399,7 +477,7 @@ export function xmlGetAttribute(node: XNode, name: string): string {
     // application.
     const value = domGetAttributeValue(node, name);
     if (value) {
-        return he.decode(value);
+        return htmlEntityDecode(value);
     }
 
     return value;
@@ -423,4 +501,232 @@ export function xmlOwnerDocument(node: XNode): XDocument {
     }
 
     return xmlOwnerDocument(node.ownerDocument);
+}
+
+/**
+ * Converts an XNode to a JSON-serializable object.
+ * Uses JSON.parse(JSON.stringify()) approach to filter out unwanted properties.
+ * @param node The node to convert.
+ * @returns A JSON-serializable object representation of the node.
+ */
+function nodeToJsonObject(node: XNode): any {
+    if (!node) {
+        return null;
+    }
+
+    const nodeType = node.nodeType;
+
+    // Handle text nodes
+    if (nodeType === DOM_TEXT_NODE || nodeType === DOM_CDATA_SECTION_NODE) {
+        const text = node.nodeValue ? node.nodeValue.trim() : '';
+        return text.length > 0 ? text : null;
+    }
+
+    // Handle comment nodes
+    if (nodeType === DOM_COMMENT_NODE) {
+        return null; // Skip comments in JSON output
+    }
+
+    // Handle document and document fragments
+    if (nodeType === DOM_DOCUMENT_NODE || nodeType === DOM_DOCUMENT_FRAGMENT_NODE) {
+        const children = node.childNodes || [];
+        const childObjects = [];
+        
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            const childObj = nodeToJsonObject(child);
+            if (childObj !== null) {
+                childObjects.push(childObj);
+            }
+        }
+
+        if (childObjects.length === 0) {
+            return null;
+        } else if (childObjects.length === 1) {
+            return childObjects[0];
+        } else {
+            return childObjects;
+        }
+    }
+
+    // Handle element nodes
+    if (nodeType === DOM_ELEMENT_NODE) {
+        const obj: any = {};
+        const element = node as any;
+        const hasAttributes = element.attributes && element.attributes.length > 0;
+        
+        // Add attributes with @ prefix
+        if (hasAttributes) {
+            for (let i = 0; i < element.attributes.length; i++) {
+                const attr = element.attributes[i];
+                obj['@' + attr.nodeName] = attr.nodeValue;
+            }
+        }
+
+        // Process child nodes
+        const children = element.childNodes || [];
+        let textContent = '';
+        let hasElementChildren = false;
+        const childElements: { [key: string]: any } = {};
+
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            const childType = child.nodeType;
+
+            if (childType === DOM_TEXT_NODE || childType === DOM_CDATA_SECTION_NODE) {
+                const text = child.nodeValue ? child.nodeValue.trim() : '';
+                if (text.length > 0) {
+                    textContent += text;
+                }
+            } else if (childType === DOM_ELEMENT_NODE) {
+                hasElementChildren = true;
+                const childElement = child as any;
+                const childName = childElement.localName || childElement.nodeName;
+                const childObj = nodeToJsonObject(child);
+
+                if (childObj !== null) {
+                    if (childElements[childName]) {
+                        // Multiple elements with same name - convert to array
+                        if (!Array.isArray(childElements[childName])) {
+                            childElements[childName] = [childElements[childName]];
+                        }
+                        childElements[childName].push(childObj);
+                    } else {
+                        childElements[childName] = childObj;
+                    }
+                }
+            }
+        }
+
+        // Add child elements to object
+        Object.assign(obj, childElements);
+
+        // Add text content if no element children and has text
+        if (!hasElementChildren && textContent.length > 0) {
+            if (!hasAttributes && Object.keys(childElements).length === 0) {
+                // Only text, no attributes or element children
+                return textContent;
+            } else {
+                // Has attributes and/or element children plus text
+                obj['#text'] = textContent;
+            }
+        }
+
+        // If completely empty (no attributes, no children, no text), return null
+        if (Object.keys(obj).length === 0) {
+            return null;
+        }
+
+        return obj;
+    }
+
+    return null;
+}
+
+/**
+ * Detects the most appropriate output format for a node based on its structure.
+ * This implements XSLT 3.1 adaptive output behavior.
+ * @param node The node to analyze.
+ * @returns The detected output method: 'text' or 'xml'.
+ */
+export function detectAdaptiveOutputFormat(node: XNode): 'text' | 'xml' {
+    if (!node) {
+        return 'xml';
+    }
+
+    const nodeType = node.nodeType;
+
+    // If it's a document or fragment, check its children
+    if (nodeType === DOM_DOCUMENT_NODE || nodeType === DOM_DOCUMENT_FRAGMENT_NODE) {
+        const children = node.childNodes || [];
+        let elementCount = 0;
+        let textCount = 0;
+        let hasSignificantText = false;
+
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            if (child.nodeType === DOM_ELEMENT_NODE) {
+                elementCount++;
+            } else if (child.nodeType === DOM_TEXT_NODE) {
+                const text = child.nodeValue ? child.nodeValue.trim() : '';
+                if (text.length > 0) {
+                    textCount++;
+                    hasSignificantText = true;
+                }
+            }
+        }
+
+        // If there's only text content and no elements, use text output
+        if (elementCount === 0 && hasSignificantText) {
+            return 'text';
+        }
+        // Otherwise, use XML output
+        return 'xml';
+    }
+
+    // If it's a single text node with content, use text output
+    if (nodeType === DOM_TEXT_NODE || nodeType === DOM_CDATA_SECTION_NODE) {
+        const text = node.nodeValue ? node.nodeValue.trim() : '';
+        if (text.length > 0) {
+            return 'text';
+        }
+    }
+
+    // For elements and other node types, use XML output
+    return 'xml';
+}
+
+/**
+ * Converts an XML document to a JSON string.
+ * The root element becomes the top-level object.
+ * Element attributes are prefixed with '@'.
+ * Text nodes become the '#text' property or the value itself.
+ * @param node The root node to convert.
+ * @returns A JSON string representation of the document.
+ */
+export function xmlToJson(node: XNode): string {
+    if (!node) {
+        return '{}';
+    }
+
+    // For document nodes, find the root element and wrap it
+    let rootElement: XNode = node;
+    if (node.nodeType === DOM_DOCUMENT_NODE || node.nodeType === DOM_DOCUMENT_FRAGMENT_NODE) {
+        const children = node.childNodes || [];
+        for (let i = 0; i < children.length; i++) {
+            if (children[i].nodeType === DOM_ELEMENT_NODE) {
+                rootElement = children[i];
+                break;
+            }
+        }
+    }
+
+    // Convert the root element to JSON
+    const element = rootElement as any;
+    const rootName = element.localName || element.nodeName;
+    const jsonObj: any = {};
+    
+    // Build the root element object
+    const elementContent = nodeToJsonObject(rootElement);
+    
+    if (elementContent === null) {
+        // Empty root element
+        jsonObj[rootName] = {};
+    } else if (typeof elementContent === 'object' && !Array.isArray(elementContent)) {
+        // Object with properties/attributes
+        jsonObj[rootName] = elementContent;
+    } else {
+        // Simple text content
+        jsonObj[rootName] = elementContent;
+    }
+
+    // Use JSON.stringify to clean up the object and then JSON.parse and stringify again
+    // This ensures we only have plain properties without circular references
+    try {
+        const cleaned = JSON.parse(JSON.stringify(jsonObj));
+        return JSON.stringify(cleaned);
+    } catch (error) {
+        // Fallback if stringification fails
+        return JSON.stringify(jsonObj);
+    }
 }

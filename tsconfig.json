@@ -1,13 +1,19 @@
 {
     "compilerOptions": {
-        "lib": ["DOM"],
+        "lib": ["DOM", "ES2019"],
         "outDir": "dist",
         "module": "CommonJS",
         "target": "ES5",
+        "ignoreDeprecations": "6.0",
+        "strict": false,
+        "strictNullChecks": false,
+        "strictPropertyInitialization": false,
+        "useUnknownInCatchVariables": false,
         "rootDir": "src",
         "allowJs": true,
         "sourceMap": true,
         "declaration": true,
+        "types": ["node"],
         "esModuleInterop": true,
         "skipLibCheck": true,
         "experimentalDecorators": true,
@@ -17,12 +23,15 @@
     "exclude": [
         "babel.config.js",
         "jest.config.ts",
-        "rollup.config.js",
+        "tsup.config.ts",
         "coverage/**/*",
         "demo/**/*",
         "dist/**/*",
-        "interactive-tests/js/**/*",
+        "interactive-tests/**/*",
         "node_modules/**/*",
+        "src/xpath/lib/tests/**/*",
+        "tmp-*.ts",
+        "test-without-jest.*",
         "tests/**/*"
     ]
 }

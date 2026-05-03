@@ -1,4 +1,4 @@
-// Copyright 2023-2024 Design Liquido
+// Copyright 2023-2026 Design Liquido
 // Copyright 2018 Johannes Wilm
 // Copyright 2005 Google Inc.
 // All Rights Reserved
@@ -15,24 +15,12 @@ export function domSetAttribute(node: XNode, name: string, value: any) {
     return node.setAttribute(name, value);
 }
 
-export function domSetTransformedAttribute(node: XNode, name: string, value: any) {
-    return node.setTransformedAttribute(name, value);
-}
-
 export function domAppendChild(node: XNode, child: any) {
     return node.appendChild(child);
 }
 
-export function domAppendTransformedChild(node: XNode, child: any) {
-    return node.appendTransformedChild(child);
-}
-
 export function domCreateTextNode(node: XDocument, text: string) {
     return node.createTextNode(text);
-}
-
-export function domCreateTransformedTextNode(node: XDocument, text: string) {
-    return node.createTransformedTextNode(text);
 }
 
 export function domCreateElement(doc: XDocument, name: string) {
@@ -53,6 +41,10 @@ export function domCreateDocumentFragment(doc: XDocument): XNode {
 
 export function domCreateDTDSection(doc: XDocument, data: any) {
     return doc.createDTDSection(data);
+}
+
+export function domCreateProcessingInstruction(doc: XDocument, target: string, data: any) {
+    return doc.createProcessingInstruction(target, data);
 }
 
 //XDocument.prototype = new XNode(DOM_DOCUMENT_NODE, '#document');

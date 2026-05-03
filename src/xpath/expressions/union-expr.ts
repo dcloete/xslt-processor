@@ -1,35 +1,22 @@
-import { ExprContext } from "..";
-import { NodeSetValue } from "../values/node-set-value";
+import { XPathExpression, XPathUnionExpression } from "../lib/src/expressions";
 import { Expression } from "./expression";
+import { NodeConverter } from "./node-converter";
 
+/**
+ * Union expression wrapper.
+ */
 export class UnionExpr extends Expression {
     expr1: Expression;
     expr2: Expression;
 
-    constructor(expr1: Expression, expr2: Expression) {
-        super();
+    constructor(
+        xpathExpression: XPathUnionExpression,
+        nodeConverter: NodeConverter,
+        expr1: Expression,
+        expr2: Expression
+    ) {
+        super(xpathExpression, nodeConverter);
         this.expr1 = expr1;
         this.expr2 = expr2;
-    }
-
-    evaluate(context: ExprContext) {
-        const nodes1 = this.expr1.evaluate(context).nodeSetValue();
-        const nodes2 = this.expr2.evaluate(context).nodeSetValue();
-        const I1 = nodes1.length;
-
-        for (const n of nodes2) {
-            let inBoth = false;
-            for (let i1 = 0; i1 < I1; ++i1) {
-                if (nodes1[i1] == n) {
-                    inBoth = true;
-                    i1 = I1; // break inner loop
-                }
-            }
-            if (!inBoth) {
-                nodes1.push(n);
-            }
-        }
-
-        return new NodeSetValue(nodes1);
     }
 }

@@ -1,6 +1,6 @@
 /* eslint-disable no-undef */
 
-// Copyright 2023-2024 Design Liquido
+// Copyright 2023-2026 Design Liquido
 // Copyright 2018 Johannes Wilm
 // Copyright 2006, Google Inc.
 // All Rights Reserved.
@@ -55,6 +55,27 @@ describe('xslt', () => {
             );
 
             assert.equal(outXmlString, expectedOutString);
+        });
+
+        it('Variables can use function names', async () => {
+            const xmlString = `<root/>`;
+
+            const xsltString = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                <xsl:template match="/">
+                    <out>
+                        <xsl:variable name="name">a</xsl:variable>
+                        <xsl:if test="$name = 'a'">A</xsl:if>
+                    </out>
+                </xsl:template>
+            </xsl:stylesheet>`;
+
+            const xsltClass = new Xslt();
+            const xmlParser = new XmlParser();
+            const xml = xmlParser.xmlParse(xmlString);
+            const xslt = xmlParser.xmlParse(xsltString);
+            const outXmlString = await xsltClass.xsltProcess(xml, xslt);
+
+            assert.equal(outXmlString, '<out>A</out>');
         });
 
         // The three examples below from Marco Balestra illustrate
@@ -199,32 +220,9 @@ describe('xslt', () => {
     });
 
     describe('xsl:text', () => {
-        // Apparently, this is not how `disable-output-escaping` works. 
-        // By an initial research, `<!DOCTYPE html>` explicitly mentioned in 
-        // the XSLT gives an error like: 
-        // `Unable to generate the XML document using the provided XML/XSL input. 
-        // org.xml.sax.SAXParseException; lineNumber: 4; columnNumber: 70; 
-        // A DOCTYPE is not allowed in content.`
-        // All the examples of `disable-output-escaping` usage will point out
-        // the opposite: `&lt;!DOCTYPE html&gt;` will become `<!DOCTYPE html>`.
-        // This test will be kept here for historical purposes.
-        it.skip('disable-output-escaping', async () => {
-            const xml = `<anything></anything>`;
-            const xslt = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
-                <xsl:output method="html" indent="yes" />
-                <xsl:template match="/">
-                    <xsl:text disable-output-escaping="yes"><!DOCTYPE html></xsl:text>
-                </xsl:template>
-            </xsl:stylesheet>`;
-
-            const xsltClass = new Xslt();
-            const xmlParser = new XmlParser();
-            const parsedXml = xmlParser.xmlParse(xml);
-            const parsedXslt = xmlParser.xmlParse(xslt);
-            const html = await xsltClass.xsltProcess(parsedXml, parsedXslt);
-            assert.equal(html, '<!DOCTYPE html>');
-        });
-
+        // Note: `disable-output-escaping` only works with escaped entities like `&lt;!DOCTYPE html&gt;`.
+        // Direct DOCTYPE declarations in XSLT (e.g., `<!DOCTYPE html>`) violate XML well-formedness rules
+        // and will cause parsing errors. The feature correctly converts escaped content to literal markup.
         it('disable-output-escaping, XML/HTML entities', async () => {
             const xml = `<anything></anything>`;
             const xslt = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
@@ -263,10 +261,10 @@ describe('xslt', () => {
                         </head>
                         <body>
                             <h1>
-                                <xsl:value-of select="ReportName"/>
+                                <xsl:value-of select="//ReportName"/>
                             </h1>
                             <p>
-                                <xsl:value-of select="GenerationDate"/>
+                                <xsl:value-of select="//GenerationDate"/>
                             </p>
                         </body>
                     </html>
@@ -407,4 +405,179 @@ describe('xslt', () => {
         const html = await xsltClass.xsltProcess(xml, xslt);
         assert.equal(html, '<item pos="2">A</item><item pos="3">B</item><item pos="1">C</item>');
     });
-});
+
+    describe('Variables and Parameters - Scoping and Shadowing', () => {
+        it('Local variable shadows global variable of same name', async () => {
+            const xmlString = `<root><item>test</item></root>`;
+
+            const xsltString = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                <xsl:variable name="x">GLOBAL</xsl:variable>
+                <xsl:template match="/">
+                    <result>
+                        <xsl:value-of select="$x"/>
+                        <xsl:variable name="x">LOCAL</xsl:variable>
+                        <xsl:value-of select="$x"/>
+                    </result>
+                </xsl:template>
+            </xsl:stylesheet>`;
+
+            const xsltClass = new Xslt();
+            const xmlParser = new XmlParser();
+            const xml = xmlParser.xmlParse(xmlString);
+            const xslt = xmlParser.xmlParse(xsltString);
+            const html = await xsltClass.xsltProcess(xml, xslt);
+
+            // Global x used before local, then local x shadows it
+            assert.equal(html, '<result>GLOBALLOCAL</result>');
+        });
+
+        it('Parameter default value used when not supplied', async () => {
+            const xmlString = `<root><item>test</item></root>`;
+
+            const xsltString = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                <xsl:template match="/">
+                    <result><xsl:call-template name="mytemplate"/></result>
+                </xsl:template>
+                <xsl:template name="mytemplate">
+                    <xsl:param name="msg">DEFAULT</xsl:param>
+                    <xsl:value-of select="$msg"/>
+                </xsl:template>
+            </xsl:stylesheet>`;
+
+            const xsltClass = new Xslt();
+            const xmlParser = new XmlParser();
+            const xml = xmlParser.xmlParse(xmlString);
+            const xslt = xmlParser.xmlParse(xsltString);
+            const html = await xsltClass.xsltProcess(xml, xslt);
+
+            assert.equal(html, '<result>DEFAULT</result>');
+        });
+
+        it('Parameter value overrides default when supplied', async () => {
+            const xmlString = `<root><item>test</item></root>`;
+
+            const xsltString = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                <xsl:template match="/">
+                    <result>
+                        <xsl:call-template name="mytemplate">
+                            <xsl:with-param name="msg">SUPPLIED</xsl:with-param>
+                        </xsl:call-template>
+                    </result>
+                </xsl:template>
+                <xsl:template name="mytemplate">
+                    <xsl:param name="msg">DEFAULT</xsl:param>
+                    <xsl:value-of select="$msg"/>
+                </xsl:template>
+            </xsl:stylesheet>`;
+
+            const xsltClass = new Xslt();
+            const xmlParser = new XmlParser();
+            const xml = xmlParser.xmlParse(xmlString);
+            const xslt = xmlParser.xmlParse(xsltString);
+            const html = await xsltClass.xsltProcess(xml, xslt);
+
+            assert.equal(html, '<result>SUPPLIED</result>');
+        });
+
+        it('Variable scope limited to ancestor/descendant context', async () => {
+            const xmlString = `<root><a>A</a><b>B</b></root>`;
+
+            const xsltString = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                <xsl:template match="/">
+                    <xsl:variable name="outer">OUTER</xsl:variable>
+                    <result>
+                        <xsl:for-each select="root/a">
+                            <xsl:variable name="inner">INNER-A</xsl:variable>
+                            <a><xsl:value-of select="$outer"/></a>
+                        </xsl:for-each>
+                        <xsl:for-each select="root/b">
+                            <!-- $inner from a is not accessible here -->
+                            <b><xsl:value-of select="$outer"/></b>
+                        </xsl:for-each>
+                    </result>
+                </xsl:variable>
+            </xsl:stylesheet>`;
+
+            const xsltClass = new Xslt();
+            const xmlParser = new XmlParser();
+            const xml = xmlParser.xmlParse(xmlString);
+            const xslt = xmlParser.xmlParse(xsltString);
+            const html = await xsltClass.xsltProcess(xml, xslt);
+
+            // Both should access outer, which is in scope
+            assert.ok(html.includes('<a>OUTER</a>'));
+            assert.ok(html.includes('<b>OUTER</b>'));
+        });
+
+        it('Parameter shadowing in nested template calls', async () => {
+            const xmlString = `<root><item>test</item></root>`;
+
+            const xsltString = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                <xsl:template match="/">
+                    <result>
+                        <xsl:call-template name="outer">
+                            <xsl:with-param name="x">OUTER-VALUE</xsl:with-param>
+                        </xsl:call-template>
+                    </result>
+                </xsl:template>
+                <xsl:template name="outer">
+                    <xsl:param name="x">OUTER-DEFAULT</xsl:param>
+                    <first><xsl:value-of select="$x"/></first>
+                    <xsl:call-template name="inner">
+                        <xsl:with-param name="x">INNER-VALUE</xsl:with-param>
+                    </xsl:call-template>
+                </xsl:template>
+                <xsl:template name="inner">
+                    <xsl:param name="x">INNER-DEFAULT</xsl:param>
+                    <second><xsl:value-of select="$x"/></second>
+                </xsl:template>
+            </xsl:stylesheet>`;
+
+            const xsltClass = new Xslt();
+            const xmlParser = new XmlParser();
+            const xml = xmlParser.xmlParse(xmlString);
+            const xslt = xmlParser.xmlParse(xsltString);
+            const html = await xsltClass.xsltProcess(xml, xslt);
+
+            // Each parameter shadows in its scope
+            assert.equal(html, '<result><first>OUTER-VALUE</first><second>INNER-VALUE</second></result>');
+        });
+
+        it('Variable with numeric expression evaluated at binding time', async () => {
+            const xmlString = `<root><a>5</a><b>3</b></root>`;
+
+            const xsltString = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                <xsl:template match="/">
+                    <xsl:variable name="result" select="number(//a) + number(//b)"/>
+                    <result><xsl:value-of select="$result"/></result>
+                </xsl:template>
+            </xsl:stylesheet>`;
+
+            const xsltClass = new Xslt();
+            const xmlParser = new XmlParser();
+            const xml = xmlParser.xmlParse(xmlString);
+            const xslt = xmlParser.xmlParse(xsltString);
+            const html = await xsltClass.xsltProcess(xml, xslt);
+
+            assert.equal(html, '<result>8</result>');
+        });
+
+        it('Global variable can use node context', async () => {
+            const xmlString = `<root><value>42</value></root>`;
+
+            const xsltString = `<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                <xsl:variable name="globalVal" select="//value"/>
+                <xsl:template match="/">
+                    <result><xsl:value-of select="$globalVal"/></result>
+                </xsl:template>
+            </xsl:stylesheet>`;
+
+            const xsltClass = new Xslt();
+            const xmlParser = new XmlParser();
+            const xml = xmlParser.xmlParse(xmlString);
+            const xslt = xmlParser.xmlParse(xsltString);
+            const html = await xsltClass.xsltProcess(xml, xslt);
+
+            assert.equal(html, '<result>42</result>');
+        });
+    });

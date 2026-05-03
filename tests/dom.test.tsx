@@ -1,4 +1,4 @@
-// Copyright 2023-2024 Design Liquido
+// Copyright 2023-2026 Design Liquido
 // Copyright 2018 Johannes Wilm
 // Copyright 2005 Google Inc.
 // All Rights Reserved
@@ -7,7 +7,7 @@
 // Author: Steffen Meschkat <mesch@google.com>
 //         Junji Takagi <jtakagi@google.com>
 //         Johannes Wilm <johannes@fiduswriter.org>
-import he from 'he';
+import { htmlEntityDecode } from '../src/dom/html-entity-decoder';
 import assert from 'assert';
 
 import { XmlParser, xmlText } from '../src/dom';
@@ -105,7 +105,7 @@ describe('dom parsing', () => {
     });
 
     it('can resolve entities', () => {
-        assert.equal('";"', he.decode('&quot;;&quot;'));
+        assert.equal('";"', htmlEntityDecode('&quot;;&quot;'));
     });
 });
 

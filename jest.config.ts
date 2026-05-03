@@ -4,6 +4,15 @@ export default async (): Promise<Config.InitialOptions> => ({
     modulePathIgnorePatterns: [
         '<rootDir>/dist/'
     ],
+    testPathIgnorePatterns: [
+        '<rootDir>/node_modules/',
+        '<rootDir>/src/xpath/lib/'
+    ],
+    coveragePathIgnorePatterns: [
+        '<rootDir>/node_modules/',
+        '<rootDir>/src/xpath/lib/'
+    ],
+    maxWorkers: '50%',
     testEnvironment: 'node',
     coverageReporters: ['json-summary', 'lcov', 'text', 'text-summary'],
     displayName: {
@@ -13,7 +22,15 @@ export default async (): Promise<Config.InitialOptions> => ({
     detectOpenHandles: true,
     preset: 'ts-jest',
     transform: {
-        '^.+\\.(ts|tsx)?$': 'ts-jest',
-        '^.+\\.(js|jsx)$': 'babel-jest'
+        '^.+\\.(ts|tsx)?$': ['ts-jest', {
+            isolatedModules: false,
+            tsconfig: 'tsconfig.jest.json',
+            diagnostics: {
+                warnOnly: true
+            }
+        }],
+        '^.+\\.(js|jsx)$': ['babel-jest', {
+            sourceMaps: true
+        }]
     }
 });

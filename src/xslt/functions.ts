@@ -1,0 +1,616 @@
+import { XNode } from "../dom/xnode";
+import { DOM_ELEMENT_NODE } from '../constants';
+import { ExprContext, XPath, MatchResolver, Expression, LocationExpr, UnionExpr } from "../xpath";
+
+import { NodeTestAny, NodeTestComment, NodeTestElementOrAttribute, NodeTestName, NodeTestNC, NodeTestPI, NodeTestText } from "../xpath/node-tests";
+import { TemplatePriorityInterface, TemplateSelectionResultInterface } from "./template-mechanics";
+
+/**
+ * Calculate the default priority for a single step pattern.
+ *
+ * According to XSLT 3.0 spec section 6.4:
+ * - Priority -0.5: node tests of form node(), text(), comment(),
+ *   processing-instruction(), *, @*, namespace::*
+ * - Priority -0.25: namespace wildcards like ns:*, @ns:*
+ * - Priority 0: qualified names like foo, @bar, processing-instruction('literal')
+ * - Priority 0.5: patterns with multiple steps or predicates
+ */
+function calculateStepPriority(step: any): number {
+    const nodeTest = step.nodeTest;
+    const hasPredicates = (step.predicate && step.predicate.length > 0) ||
+                          (step.predicates && step.predicates.length > 0);
+
+    // Predicates always result in 0.5
+    if (hasPredicates) {
+        return 0.5;
+    }
+
+    // Handle new XPath implementation's object-based node tests
+    if (nodeTest && typeof nodeTest === 'object' && 'type' in nodeTest) {
+        switch (nodeTest.type) {
+            case 'wildcard':
+                // Check for namespace wildcard like "ns:*"
+                if (nodeTest.name && nodeTest.name.endsWith(':*')) {
+                    return -0.25;
+                }
+                // Regular wildcard * or @*
+                return -0.5;
+
+            case 'node-type':
+                // node(), text(), comment(), processing-instruction()
+                if (nodeTest.nodeType === 'processing-instruction' && nodeTest.name) {
+                    // processing-instruction('literal') has priority 0
+                    return 0;
+                }
+                return -0.5;
+
+            case 'processing-instruction':
+                // processing-instruction('literal') or processing-instruction()
+                // The target is stored in nodeTest.target or nodeTest.name
+                return (nodeTest.target || nodeTest.name) ? 0 : -0.5;
+
+            case 'name':
+                // Qualified name like foo, ns:foo, @bar
+                return 0;
+
+            default:
+                return 0;
+        }
+    }
+
+    // Handle legacy class-based node tests (for backward compatibility)
+    if (nodeTest instanceof NodeTestAny) {
+        // node() - matches any node
+        return -0.5;
+    }
+
+    if (nodeTest instanceof NodeTestElementOrAttribute) {
+        // * or @* - wildcard for elements or attributes
+        return -0.5;
+    }
+
+    if (nodeTest instanceof NodeTestText) {
+        // text()
+        return -0.5;
+    }
+
+    if (nodeTest instanceof NodeTestComment) {
+        // comment()
+        return -0.5;
+    }
+
+    if (nodeTest instanceof NodeTestPI) {
+        // processing-instruction() - with literal = 0, without = -0.5
+        return nodeTest.target ? 0 : -0.5;
+    }
+
+    if (nodeTest instanceof NodeTestNC) {
+        // Namespace wildcard like ns:* - priority -0.25
+        return -0.25;
+    }
+
+    if (nodeTest instanceof NodeTestName) {
+        // Qualified name like foo, ns:foo, @bar
+        return 0;
+    }
+
+    // Default fallback
+    return 0;
+}
+
+/**
+ * Calculate the default priority for a location path expression.
+ */
+function calculateLocationPathPriority(expr: LocationExpr): number {
+    if (!expr.steps || expr.steps.length === 0) {
+        // "/" alone (absolute path with no steps) matches the document root
+        // According to XSLT spec, this has priority -0.5
+        if (expr.absolute) {
+            return -0.5;
+        }
+        return 0;
+    }
+
+    // Multiple steps = priority 0.5
+    if (expr.steps.length > 1) {
+        return 0.5;
+    }
+
+    // Single step - check for explicit axis (other than child/attribute)
+    const step = expr.steps[0];
+    const axis = step.axis;
+
+    // If the pattern uses an explicit axis other than the default (child/attribute),
+    // it's considered a more complex pattern with priority 0.5
+    // Default axes are: child (for elements) and attribute (for @)
+    if (axis && axis !== 'child' && axis !== 'attribute' && axis !== 'self-and-siblings') {
+        return 0.5;
+    }
+
+    // Single step with default axis - calculate based on the step's node test
+    return calculateStepPriority(step);
+}
+
+/**
+ * Calculate the default priority for a union expression.
+ * For union patterns like "foo | bar", each alternative is treated as a
+ * separate rule. When used as a single template, we return the lowest priority
+ * among all alternatives (most conservative).
+ */
+function calculateUnionExprPriority(expr: UnionExpr, xPath: XPath): number {
+    const priority1 = calculateDefaultPriorityFromExpression(expr.expr1, xPath);
+    const priority2 = calculateDefaultPriorityFromExpression(expr.expr2, xPath);
+    // Return the lowest (most conservative) priority for union patterns
+    return Math.min(priority1, priority2);
+}
+
+/**
+ * Calculate the default priority from a parsed expression.
+ */
+function calculateDefaultPriorityFromExpression(expr: Expression, xPath: XPath): number {
+    if (expr instanceof LocationExpr) {
+        return calculateLocationPathPriority(expr);
+    }
+
+    if (expr instanceof UnionExpr) {
+        return calculateUnionExprPriority(expr, xPath);
+    }
+
+    // For other expression types (filter, path, function call, etc.),
+    // use priority 0.5 as they represent complex patterns
+    return 0.5;
+}
+
+/**
+ * Calculate the default priority for an XSLT pattern string.
+ *
+ * @param pattern The match pattern string (e.g., "book", "chapter/title", "*")
+ * @param xPath The XPath instance for parsing
+ * @returns The calculated default priority
+ */
+export function calculateDefaultPriority(
+    pattern: string,
+    xPath: XPath,
+    warningsCallback?: (...args: any[]) => void
+): number {
+    try {
+        // Parse without axis override to preserve original axis for priority calculation
+        const expr = xPath.xPathParse(pattern);
+        return calculateDefaultPriorityFromExpression(expr, xPath);
+    } catch (e) {
+        // If parsing fails, return default priority 0
+        const warn = warningsCallback ?? console.warn;
+        warn(`Failed to parse pattern "${pattern}" for priority calculation:`, e);
+        return 0;
+    }
+}
+
+/**
+ * Check if a template matches the given mode.
+ * A template matches if:
+ * - mode is null/undefined and template has no mode attribute
+ * - mode is '#all' (matches any template)
+ * - template mode equals the given mode
+ * - template mode is '#all'
+ */
+function matchesMode(template: XNode, mode: string | null): boolean {
+    const templateMode = template.getAttributeValue('mode');
+
+    // If no mode specified in apply-templates, match templates without mode
+    if (!mode) {
+        return !templateMode || templateMode === '#default';
+    }
+
+    // Mode '#all' in apply-templates matches any template
+    if (mode === '#all') {
+        return true;
+    }
+
+    // Template with mode '#all' matches any mode
+    if (templateMode === '#all') {
+        return true;
+    }
+
+    // Direct mode match
+    return templateMode === mode;
+}
+
+/**
+ * Check if a node is an xsl:template element.
+ */
+function isTemplate(node: XNode): boolean {
+    if (node.nodeType !== DOM_ELEMENT_NODE) {
+        return false;
+    }
+
+    // Check by namespace URI or prefix
+    if (node.namespaceUri === 'http://www.w3.org/1999/XSL/Transform') {
+        return node.localName === 'template';
+    }
+
+    return node.prefix === 'xsl' && node.localName === 'template';
+}
+
+/**
+ * Calculate priority for a single pattern alternative (non-union).
+ * This is used when expanding union patterns into separate template entries.
+ *
+ * @param pattern Single pattern alternative (should not contain '|' at top level)
+ * @param xPath XPath instance for parsing
+ * @returns The default priority for this single pattern
+ */
+function calculateSinglePatternPriority(pattern: string, xPath: XPath): number {
+    try {
+        const expr = xPath.xPathParse(pattern);
+        // Use the same logic as calculateDefaultPriorityFromExpression but
+        // this should not encounter unions since we've already split them
+        if (expr instanceof LocationExpr) {
+            return calculateLocationPathPriority(expr);
+        }
+        // For other expressions, use 0.5 as they represent complex patterns
+        return 0.5;
+    } catch (e) {
+        return 0;
+    }
+}
+
+/**
+ * Collect all templates from the stylesheet with their priority metadata.
+ *
+ * Per XSLT 1.0 Section 5.3: "If a template rule contains a pattern that is a union
+ * of multiple alternatives, then the rule is equivalent to a set of template rules,
+ * one for each alternative."
+ *
+ * This function expands union patterns (like "foo|bar") into separate template
+ * entries, each with the priority of its specific alternative.
+ *
+ * @param stylesheetElement The root element of the stylesheet (xsl:stylesheet or xsl:transform)
+ * @param mode The mode to filter templates by (null for default mode)
+ * @param xPath The XPath instance for parsing patterns
+ * @returns Array of templates with priority metadata
+ */
+export function collectAndExpandTemplates(
+    stylesheetElement: XNode,
+    mode: string | null,
+    xPath: XPath,
+    templateSourceMap?: Map<XNode, { importDepth: number; href: string; order: number }>
+): TemplatePriorityInterface[] {
+    const templates: TemplatePriorityInterface[] = [];
+    let docOrder = 0;
+
+    for (const child of stylesheetElement.childNodes) {
+        if (!isTemplate(child)) {
+            continue;
+        }
+
+        if (!matchesMode(child, mode)) {
+            continue;
+        }
+
+        const match = child.getAttributeValue('match');
+        if (!match) {
+            // Templates without match attribute are named templates, skip them
+            continue;
+        }
+
+        const priorityAttr = child.getAttributeValue('priority');
+        const explicitPriority = priorityAttr ? parseFloat(priorityAttr) : null;
+
+        // Get import precedence from template source map.
+        // XSLT import precedence depends first on import depth (shallower = higher),
+        // and then on import order among stylesheets imported at the same depth
+        // (later imports have higher precedence).
+        const metadata = templateSourceMap?.get(child);
+        let importPrecedence = 0;
+        if (metadata) {
+            const DEPTH_WEIGHT = Number.MAX_SAFE_INTEGER / 2;
+            const depthComponent = -metadata.importDepth * DEPTH_WEIGHT; // Negative so main stylesheet has highest precedence
+            const orderComponent = (metadata as any).order ?? 0;
+            importPrecedence = depthComponent + orderComponent;
+        }
+
+        // Per XSLT 1.0 Section 5.3, expand union patterns into separate entries
+        // Each alternative gets its own priority calculation
+        const alternatives = splitUnionPattern(match);
+
+        for (const alternative of alternatives) {
+            // Calculate default priority for this specific alternative
+            const defaultPriority = calculateSinglePatternPriority(alternative, xPath);
+            const effectivePriority = explicitPriority !== null && !isNaN(explicitPriority)
+                ? explicitPriority
+                : defaultPriority;
+
+            templates.push({
+                template: child,
+                explicitPriority: explicitPriority !== null && !isNaN(explicitPriority) ? explicitPriority : null,
+                defaultPriority,
+                effectivePriority,
+                importPrecedence,
+                documentOrder: docOrder++,
+                matchPattern: alternative  // Use the individual alternative, not the full union
+            });
+        }
+    }
+
+    return templates;
+}
+
+/**
+ * Split a pattern string by the union operator '|', respecting brackets and quotes.
+ * For example: "@*|node()" -> ["@*", "node()"]
+ * But: "item[@id='a|b']" -> ["item[@id='a|b']"] (not split inside quotes)
+ *
+ * @param pattern The pattern string to split
+ * @returns Array of pattern alternatives
+ */
+function splitUnionPattern(pattern: string): string[] {
+    const alternatives: string[] = [];
+    let current = '';
+    let depth = 0; // Track bracket depth
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+
+    for (let i = 0; i < pattern.length; i++) {
+        const char = pattern[i];
+
+        if (char === "'" && !inDoubleQuote) {
+            inSingleQuote = !inSingleQuote;
+            current += char;
+        } else if (char === '"' && !inSingleQuote) {
+            inDoubleQuote = !inDoubleQuote;
+            current += char;
+        } else if (!inSingleQuote && !inDoubleQuote) {
+            if (char === '[' || char === '(') {
+                depth++;
+                current += char;
+            } else if (char === ']' || char === ')') {
+                depth--;
+                current += char;
+            } else if (char === '|' && depth === 0) {
+                // Union operator at top level
+                alternatives.push(current.trim());
+                current = '';
+            } else {
+                current += char;
+            }
+        } else {
+            current += char;
+        }
+    }
+
+    // Don't forget the last alternative
+    if (current.trim()) {
+        alternatives.push(current.trim());
+    }
+
+    return alternatives;
+}
+
+/**
+ * Check if a node matches a single (non-union) pattern.
+ *
+ * @param node The node to test
+ * @param pattern The match pattern string (should not contain union operator at top level)
+ * @param context The original context (for namespace/variable info)
+ * @param matchResolver The match resolver
+ * @param xPath The XPath instance
+ * @returns true if the node matches the pattern
+ */
+function nodeMatchesSinglePattern(
+    node: XNode,
+    pattern: string,
+    context: ExprContext,
+    matchResolver: MatchResolver,
+    xPath: XPath
+): boolean {
+    // Special case for root pattern "/"
+    if (pattern === '/') {
+        return node.nodeName === '#document';
+    }
+
+    // Special case for attribute patterns like "@class", "@*", "@ns:name"
+    if (pattern.startsWith('@')) {
+        // Only attribute nodes (nodeType 2) can match attribute patterns
+        if (node.nodeType !== 2) {
+            return false;
+        }
+        const attrPattern = pattern.substring(1); // Remove '@'
+        if (attrPattern === '*') {
+            // @* matches any attribute
+            return true;
+        }
+        // Match by attribute name (considering local name for namespaced attributes)
+        const attrName = node.localName || node.nodeName;
+        // Handle namespaced patterns like "ns:name" - just compare local names
+        const patternLocalName = attrPattern.includes(':')
+            ? attrPattern.substring(attrPattern.indexOf(':') + 1)
+            : attrPattern;
+        return attrName === patternLocalName || node.nodeName === attrPattern;
+    }
+
+    // For patterns starting with '*' (where axis override doesn't work),
+    // check if the node passes the pattern test directly
+    if (pattern === '*' && node.nodeType === DOM_ELEMENT_NODE) {
+        return true;
+    }
+
+    // For simple element name patterns first (like "section" or "div")
+    // Try matching by element name directly
+    if (!pattern.includes('/') && !pattern.includes('[') && !pattern.startsWith('@')) {
+        if (pattern === node.nodeName || pattern === node.localName) {
+            return true;
+        }
+    }
+
+    // For patterns with '/' (absolute or descendant paths) or '[' (predicates),
+    // we need to evaluate from document root and check if node is in result
+    if (pattern.includes('/') || pattern.includes('[')) {
+        try {
+            // Evaluate pattern from document root
+            // If pattern doesn't start with '/', add '//' to match anywhere in document
+            const evaluationPattern = pattern.startsWith('/') ? pattern : '//' + pattern;
+            const rootContext = context.clone([context.root], 0);
+            
+            // Use xPathEval for pattern evaluation (handles // patterns correctly)
+            const evalResult = xPath.xPathEval(evaluationPattern, rootContext);
+            const nodes = evalResult.nodeSetValue();
+
+            if (nodes.some(n => n.id === node.id)) {
+                return true;
+            }
+        } catch (e) {
+            // Pattern parsing failed, continue to next approach
+        }
+    }
+
+    // For simple element name patterns - try with 'self-and-siblings' axis override as fallback
+    if (!pattern.includes('/') && !pattern.includes('[') && !pattern.startsWith('@')) {
+        try {
+            const nodeContext = context.clone([node], 0);
+            const expr = xPath.xPathParse(pattern, 'self-and-siblings');
+            const nodes = matchResolver.expressionMatch(expr, nodeContext);
+
+            // Check if the current node is in the matched nodes
+            if (nodes.some(n => n.id === node.id)) {
+                return true;
+            }
+        } catch (e) {
+            // Pattern parsing failed
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Check if a node matches a given pattern.
+ * This handles union patterns by splitting them and testing each alternative.
+ *
+ * @param node The node to test
+ * @param pattern The match pattern string
+ * @param context The original context (for namespace/variable info)
+ * @param matchResolver The match resolver
+ * @param xPath The XPath instance
+ * @returns true if the node matches the pattern
+ */
+export function nodeMatchesPattern(
+    node: XNode,
+    pattern: string,
+    context: ExprContext,
+    matchResolver: MatchResolver,
+    xPath: XPath
+): boolean {
+    // Handle union patterns by splitting and testing each alternative
+    const alternatives = splitUnionPattern(pattern);
+
+    // If there are multiple alternatives, test each one
+    // Return true if ANY alternative matches
+    for (const alt of alternatives) {
+        if (nodeMatchesSinglePattern(node, alt, context, matchResolver, xPath)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Select the best matching template from a list of templates.
+ *
+ * Selection rules (XSLT 3.0 spec section 6.4):
+ * 1. Import precedence (higher wins)
+ * 2. Effective priority (higher wins)
+ * 3. Document order (last template wins if all else is equal)
+ *
+ * @param templates Array of templates with priority metadata
+ * @param context The expression context for matching
+ * @param matchResolver The match resolver for testing patterns
+ * @param xPath The XPath instance for parsing
+ * @returns The selection result
+ */
+export function selectBestTemplate(
+    templates: TemplatePriorityInterface[],
+    context: ExprContext,
+    matchResolver: MatchResolver,
+    xPath: XPath,
+    warningsCallback?: (...args: any[]) => void
+): TemplateSelectionResultInterface {
+    const warn = warningsCallback ?? console.warn;
+    // 1. Filter to templates that match the current node
+    const matching: TemplatePriorityInterface[] = [];
+    const currentNode = context.nodeList[context.position];
+
+    for (const t of templates) {
+        try {
+            if (nodeMatchesPattern(currentNode, t.matchPattern, context, matchResolver, xPath)) {
+                matching.push(t);
+            }
+        } catch (e) {
+            // If pattern matching fails, skip this template
+            warn(`Failed to match pattern "${t.matchPattern}":`, e);
+        }
+    }
+
+    if (matching.length === 0) {
+        return {
+            selectedTemplate: null,
+            hasConflict: false,
+            conflictingTemplates: []
+        };
+    }
+
+    // 2. Sort by: importPrecedence DESC, effectivePriority DESC, documentOrder DESC
+    matching.sort((a, b) => {
+        // Higher import precedence wins
+        if (a.importPrecedence !== b.importPrecedence) {
+            return b.importPrecedence - a.importPrecedence;
+        }
+        // Higher priority wins
+        if (a.effectivePriority !== b.effectivePriority) {
+            return b.effectivePriority - a.effectivePriority;
+        }
+        // Later document order wins (last template wins)
+        return b.documentOrder - a.documentOrder;
+    });
+
+    // 3. Detect conflicts - templates with same import precedence and priority
+    const winner = matching[0];
+    const conflicts = matching.filter(t =>
+        t.importPrecedence === winner.importPrecedence &&
+        t.effectivePriority === winner.effectivePriority
+    );
+
+    return {
+        selectedTemplate: winner.template,
+        hasConflict: conflicts.length > 1,
+        conflictingTemplates: conflicts.length > 1 ? conflicts : [],
+        originalComponent: winner.originalComponent
+    };
+}
+
+/**
+ * Emit a warning when template conflicts are detected.
+ *
+ * @param result The template selection result
+ * @param node The node being matched
+ */
+export function emitConflictWarning(
+    result: TemplateSelectionResultInterface,
+    node: XNode,
+    warningsCallback?: (...args: any[]) => void
+): void {
+    if (!result.hasConflict || result.conflictingTemplates.length < 2) {
+        return;
+    }
+
+    const patterns = result.conflictingTemplates
+        .map(t => `"${t.matchPattern}" (priority: ${t.effectivePriority})`)
+        .join(', ');
+
+    const warn = warningsCallback ?? console.warn;
+    warn(
+        `XSLT Warning: Ambiguous template match for node <${node.nodeName}>. ` +
+        `Multiple templates match with equal priority: ${patterns}. ` +
+        `Using the last one in document order.`
+    );
+}

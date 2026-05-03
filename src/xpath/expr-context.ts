@@ -3,9 +3,12 @@ import { BooleanValue } from './values/boolean-value';
 import { NodeSetValue } from './values/node-set-value';
 import { NumberValue } from './values/number-value';
 import { StringValue } from './values/string-value';
+import { MapValue } from './values/map-value';
+import { ArrayValue } from './values/array-value';
+import { FunctionValue } from './values/function-value';
 import { TOK_NUMBER } from './tokens';
 import { XNode } from '../dom';
-import { XsltDecimalFormatSettings } from '../xslt/xslt-decimal-format-settings';
+import { XsltDecimalFormatSettings } from '../xslt/types';
 import { NodeValue } from './values';
 
 /**
@@ -45,26 +48,73 @@ import { NodeValue } from './values';
 export class ExprContext {
     position: number;
     nodeList: XNode[];
-    outputPosition: number;
-    outputNodeList: XNode[];
-    outputDepth: number;
     xsltVersion: '1.0' | '2.0' | '3.0';
 
     variables: { [name: string]: NodeValue };
     keys: { [name: string]: { [key: string]: NodeValue } };
     knownNamespaces: { [alias: string]: string };
 
+    /**
+     * Custom system properties for system-property() function.
+     * Overrides the default properties (xsl:version, xsl:vendor, xsl:vendor-url).
+     */
+    systemProperties?: { [name: string]: string };
+
+    /**
+     * Document loader function for the document() function.
+     * Takes a URI and returns an XNode document, or null if loading fails.
+     */
+    documentLoader?: (uri: string) => XNode | null;
+
+    /**
+     * Unparsed entity URIs for the unparsed-entity-uri() function.
+     * Maps entity names to their URIs (from DTD declarations).
+     */
+    unparsedEntities?: { [name: string]: string };
+
+    /**
+     * Warning callback for non-fatal XPath/XSLT warnings.
+     */
+    warningsCallback?: (...args: any[]) => void;
+
     caseInsensitive: any;
     ignoreAttributesWithoutValue: any;
     returnOnFirstMatch: any;
     ignoreNonElementNodesForNTA: any;
 
-    parent: ExprContext;
+    parent: ExprContext | null;
     root: XNode;
     decimalFormatSettings: XsltDecimalFormatSettings;
 
     inApplyTemplates: boolean;
     baseTemplateMatched: boolean;
+
+    /**
+     * Regex groups from xsl:analyze-string for regex-group() function.
+     * Index 0 is the full match, 1+ are captured groups.
+     */
+    regexGroups?: string[];
+
+    /**
+     * Current group from xsl:for-each-group for current-group() function.
+     * Contains the nodes/items in the current group being processed.
+     */
+    currentGroup?: XNode[];
+
+    /**
+     * Current grouping key from xsl:for-each-group for current-grouping-key() function.
+     * Contains the key value of the current group being processed.
+     */
+    currentGroupingKey?: any;
+
+    /**
+     * User-defined XSLT functions from xsl:function declarations.
+     * Maps QName (namespace:localname) to function definition info.
+     */
+    userDefinedFunctions?: Map<string, {
+        functionDef: XNode;
+        executor: (context: ExprContext, functionDef: XNode, args: any[]) => any;
+    }>;
 
     /**
      * Constructor -- gets the node, its position, the node set it
@@ -77,23 +127,19 @@ export class ExprContext {
      *
      * Notice that position starts at 0 at the outside interface;
      * inside XPath expressions this shows up as position()=1.
-     * @param nodeList TODO
-     * @param outputNodeList TODO
-     * @param opt_position TODO
-     * @param opt_outputPosition TODO
-     * @param opt_parent TODO
-     * @param opt_caseInsensitive TODO
-     * @param opt_ignoreAttributesWithoutValue TODO
-     * @param opt_returnOnFirstMatch TODO
-     * @param opt_ignoreNonElementNodesForNTA TODO
+     * @param nodeList The list of nodes that contains the current node. This is needed to implement the position() and last() functions, and to evaluate predicates.
+     * @param xsltVersion The XSLT version in use, which may affect certain function behaviors (e.g. 1.0 vs 2.0).
+     * @param opt_position The position of the current node in the nodeList. Defaults to 0.
+     * @param opt_parent The parent expression context, used for variable scoping. Defaults to null.
+     * @param opt_caseInsensitive Whether node name tests should be case insensitive. Defaults to false.
+     * @param opt_ignoreAttributesWithoutValue Whether to ignore attributes that have no value (e.g. <input disabled>) when evaluating XPath expressions. Defaults to false.
+     * @param opt_returnOnFirstMatch Whether XPath evaluation should return as soon as the first match is found. Defaults to false.
+     * @param opt_ignoreNonElementNodesForNTA Whether to ignore non-element nodes when evaluating the "node()" any node test. Defaults to false.
      */
     constructor(
         nodeList: XNode[],
-        outputNodeList: XNode[],
         xsltVersion: '1.0' | '2.0' | '3.0' = '1.0',
         opt_position?: number,
-        opt_outputPosition?: number,
-        opt_outputDepth?: number,
         opt_decimalFormatSettings?: XsltDecimalFormatSettings,
         opt_variables?: { [name: string]: any },
         opt_knownNamespaces?: { [alias: string]: string },
@@ -101,14 +147,13 @@ export class ExprContext {
         opt_caseInsensitive?: any,
         opt_ignoreAttributesWithoutValue?: any,
         opt_returnOnFirstMatch?: any,
-        opt_ignoreNonElementNodesForNTA?: any
+        opt_ignoreNonElementNodesForNTA?: any,
+        opt_warningsCallback?: (...args: any[]) => void
     ) {
         this.nodeList = nodeList;
-        this.outputNodeList = outputNodeList;
         this.xsltVersion = xsltVersion;
 
         this.position = opt_position || 0;
-        this.outputPosition = opt_outputPosition || 0;
 
         this.variables = opt_variables || {};
         this.keys = opt_parent?.keys || {};
@@ -121,7 +166,7 @@ export class ExprContext {
         this.ignoreNonElementNodesForNTA = opt_ignoreNonElementNodesForNTA || false;
         this.inApplyTemplates = false;
         this.baseTemplateMatched = false;
-        this.outputDepth = opt_outputDepth || 0;
+        this.warningsCallback = opt_warningsCallback ?? opt_parent?.warningsCallback;
 
         this.decimalFormatSettings = opt_decimalFormatSettings || {
             decimalSeparator: '.',
@@ -154,56 +199,36 @@ export class ExprContext {
      * parent. If passed as argument to clone(), the new context has a
      * different node, position, or node set. What is not passed is
      * inherited from the cloned context.
-     * @param opt_nodeList TODO
-     * @param opt_outputNodeList TODO
-     * @param opt_position TODO
-     * @param opt_outputPosition TODO
-     * @returns TODO
+     * @param opt_nodeList The node list for the new context. If not provided, the new context inherits the node list of the current context.
+     * @param opt_position The position for the new context. If not provided, the new context inherits the position of the current context.
+     * @returns A new ExprContext instance with the specified node list and position, and the current context as its parent.
      */
-    clone(opt_nodeList?: XNode[], opt_outputNodeList?: XNode[], opt_position?: number, opt_outputPosition?: number) {
+    clone(opt_nodeList?: XNode[], opt_position?: number) {
         return new ExprContext(
             opt_nodeList || this.nodeList,
-            opt_outputNodeList || this.outputNodeList,
             this.xsltVersion,
             typeof opt_position !== 'undefined' ? opt_position : this.position,
-            typeof opt_outputPosition !== 'undefined' ? opt_outputPosition : this.outputPosition,
-            this.outputDepth,
             this.decimalFormatSettings,
-            this.variables,
+            Object.create(this.variables || {}),
             this.knownNamespaces,
             this,
             this.caseInsensitive,
             this.ignoreAttributesWithoutValue,
             this.returnOnFirstMatch,
-            this.ignoreNonElementNodesForNTA
+            this.ignoreNonElementNodesForNTA,
+            this.warningsCallback
         );
     }
 
-    cloneByOutput(opt_outputNodeList?: XNode[], opt_outputPosition?: number, opt_outputDepth?: number) {
-        return new ExprContext(
-            this.nodeList,
-            opt_outputNodeList || this.outputNodeList,
-            this.xsltVersion,
-            this.position,
-            typeof opt_outputPosition !== 'undefined' ? opt_outputPosition : this.outputPosition,
-            typeof opt_outputDepth !== 'undefined' ? opt_outputDepth : this.outputDepth,
-            this.decimalFormatSettings,
-            this.variables,
-            this.knownNamespaces,
-            this,
-            this.caseInsensitive,
-            this.ignoreAttributesWithoutValue,
-            this.returnOnFirstMatch,
-            this.ignoreNonElementNodesForNTA
-        );
-    }
-
-    setVariable(name?: string, value?: NodeValue | string) {
+    setVariable(name: string, value?: NodeValue | string) {
         if (
             value instanceof StringValue ||
             value instanceof BooleanValue ||
             value instanceof NumberValue ||
-            value instanceof NodeSetValue
+            value instanceof NodeSetValue ||
+            value instanceof MapValue ||
+            value instanceof ArrayValue ||
+            value instanceof FunctionValue
         ) {
             this.variables[name] = value;
             return;
@@ -221,7 +246,7 @@ export class ExprContext {
         }
     }
 
-    getVariable(name: string): NodeValue {
+    getVariable(name: string): NodeValue | null {
         if (typeof this.variables[name] != 'undefined') {
             return this.variables[name];
         }
@@ -231,6 +256,24 @@ export class ExprContext {
         }
 
         return null;
+    }
+
+    /**
+     * Gets a regex group from xsl:analyze-string context.
+     * Searches up the parent chain for regexGroups.
+     * @param index Group index (0 = full match, 1+ = captured groups)
+     * @returns The group value or empty string if not found
+     */
+    getRegexGroup(index: number): string {
+        if (this.regexGroups && index >= 0 && index < this.regexGroups.length) {
+            return this.regexGroups[index] ?? '';
+        }
+
+        if (this.parent) {
+            return this.parent.getRegexGroup(index);
+        }
+
+        return '';
     }
 
     setNode(position: number) {
@@ -245,31 +288,31 @@ export class ExprContext {
         return this.caseInsensitive;
     }
 
-    setCaseInsensitive(caseInsensitive) {
+    setCaseInsensitive(caseInsensitive: boolean): boolean {
         return (this.caseInsensitive = caseInsensitive);
     }
 
-    isIgnoreAttributesWithoutValue() {
+    isIgnoreAttributesWithoutValue(): boolean {
         return this.ignoreAttributesWithoutValue;
     }
 
-    setIgnoreAttributesWithoutValue(ignore) {
+    setIgnoreAttributesWithoutValue(ignore: boolean): boolean {
         return (this.ignoreAttributesWithoutValue = ignore);
     }
 
-    isReturnOnFirstMatch() {
+    isReturnOnFirstMatch(): boolean {
         return this.returnOnFirstMatch;
     }
 
-    setReturnOnFirstMatch(returnOnFirstMatch) {
+    setReturnOnFirstMatch(returnOnFirstMatch: boolean): boolean {
         return (this.returnOnFirstMatch = returnOnFirstMatch);
     }
 
-    isIgnoreNonElementNodesForNTA() {
+    isIgnoreNonElementNodesForNTA(): boolean {
         return this.ignoreNonElementNodesForNTA;
     }
 
-    setIgnoreNonElementNodesForNTA(ignoreNonElementNodesForNTA) {
+    setIgnoreNonElementNodesForNTA(ignoreNonElementNodesForNTA: boolean): boolean {
         return (this.ignoreNonElementNodesForNTA = ignoreNonElementNodesForNTA);
     }
 }
